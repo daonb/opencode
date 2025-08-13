@@ -419,6 +419,7 @@ func (m *messagesComponent) renderView() tea.Cmd {
 						if strings.TrimSpace(part.Text) == "" {
 							continue
 						}
+
 						hasTextPart = true
 						finished := part.Time.End > 0
 						remainingParts := message.Parts[partIndex+1:]

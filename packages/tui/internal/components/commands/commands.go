@@ -68,6 +68,15 @@ func (c *commandsComponent) View() string {
 		}
 	}
 
+	// Add custom commands (they all have triggers)
+	for _, customCmd := range c.app.CustomCommandRegistry.GetCommandsWithTrigger() {
+		triggeredCommands = append(triggeredCommands, commands.Command{
+			Name:        commands.CommandName(customCmd.Name),
+			Description: customCmd.Description,
+			Trigger:     customCmd.Trigger,
+		})
+	}
+
 	// Combine triggered commands first, then untriggered
 	commandsToShow = append(commandsToShow, triggeredCommands...)
 	commandsToShow = append(commandsToShow, untriggeredCommands...)

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"log/slog"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/sst/opencode/internal/clipboard"
 	"github.com/sst/opencode/internal/commands"
 	"github.com/sst/opencode/internal/components/toast"
+	"github.com/sst/opencode/internal/customcommands"
 	"github.com/sst/opencode/internal/id"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
@@ -27,28 +29,29 @@ type Message struct {
 }
 
 type App struct {
-	Info              opencode.App
-	Agents            []opencode.Agent
-	Providers         []opencode.Provider
-	Version           string
-	StatePath         string
-	Config            *opencode.Config
-	Client            *opencode.Client
-	State             *State
-	AgentIndex        int
-	Provider          *opencode.Provider
-	Model             *opencode.Model
-	Session           *opencode.Session
-	Messages          []Message
-	Permissions       []opencode.Permission
-	CurrentPermission opencode.Permission
-	Commands          commands.CommandRegistry
-	InitialModel      *string
-	InitialPrompt     *string
-	InitialAgent      *string
-	InitialSession    *string
-	compactCancel     context.CancelFunc
-	IsLeaderSequence  bool
+	Info                  opencode.App
+	Agents                []opencode.Agent
+	Providers             []opencode.Provider
+	Version               string
+	StatePath             string
+	Config                *opencode.Config
+	Client                *opencode.Client
+	State                 *State
+	AgentIndex            int
+	Provider              *opencode.Provider
+	Model                 *opencode.Model
+	Session               *opencode.Session
+	Messages              []Message
+	Permissions           []opencode.Permission
+	CurrentPermission     opencode.Permission
+	Commands              commands.CommandRegistry
+	CustomCommandRegistry *customcommands.Registry
+	InitialModel          *string
+	InitialPrompt         *string
+	InitialAgent          *string
+	InitialSession        *string
+	compactCancel         context.CancelFunc
+	IsLeaderSequence      bool
 }
 
 func (a *App) Agent() *opencode.Agent {
@@ -87,6 +90,11 @@ type FileRenderedMsg struct {
 }
 type PermissionRespondedToMsg struct {
 	Response opencode.SessionPermissionRespondParamsResponse
+}
+
+type SystemMessageAddedMsg struct {
+	MessageID   string
+	CommandName string
 }
 
 func New(
@@ -178,22 +186,50 @@ func New(
 
 	slog.Debug("Loaded config", "config", configInfo)
 
+	commandRegistry := commands.LoadFromConfig(configInfo)
+
+	// Get providers from the API
+	providersResponse, err := httpClient.App.Providers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get providers: %w", err)
+	}
+	providers := providersResponse.Providers
+
+	// Find default provider and model
+	var provider opencode.Provider
+	var model opencode.Model
+	if len(providers) > 0 {
+		provider = providers[0]
+		for _, m := range provider.Models {
+			model = m
+			break
+		}
+	}
+
 	app := &App{
-		Info:           appInfo,
-		Agents:         agents,
-		Version:        version,
-		StatePath:      appStatePath,
-		Config:         configInfo,
-		State:          appState,
-		Client:         httpClient,
-		AgentIndex:     agentIndex,
-		Session:        &opencode.Session{},
-		Messages:       []Message{},
-		Commands:       commands.LoadFromConfig(configInfo),
-		InitialModel:   initialModel,
-		InitialPrompt:  initialPrompt,
-		InitialAgent:   initialAgent,
-		InitialSession: initialSession,
+		Info:                  appInfo,
+		Agents:                agents,
+		Providers:             providers,
+		Version:               version,
+		StatePath:             appStatePath,
+		Config:                configInfo,
+		Client:                httpClient,
+		State:                 appState,
+		AgentIndex:            agentIndex,
+		Provider:              &provider,
+		Model:                 &model,
+		Session:               &opencode.Session{},
+		Messages:              []Message{},
+		Permissions:           []opencode.Permission{},
+		CurrentPermission:     opencode.Permission{},
+		Commands:              commandRegistry,
+		CustomCommandRegistry: customcommands.NewRegistry(commandRegistry, appInfo.Path.Root),
+		InitialModel:          initialModel,
+		InitialPrompt:         initialPrompt,
+		InitialAgent:          initialAgent,
+		InitialSession:        initialSession,
+		compactCancel:         nil,
+		IsLeaderSequence:      false,
 	}
 
 	return app, nil
@@ -804,6 +840,62 @@ func (a *App) ListProviders(ctx context.Context) ([]opencode.Provider, error) {
 
 	providers := *response
 	return providers.Providers, nil
+}
+
+// AddSystemMessage adds a system-generated message (like custom command output)
+// and returns a tea.Cmd to trigger UI updates
+func (a *App) createTextPart(msgID, content string, timestamp float64) opencode.TextPart {
+	return opencode.TextPart{
+		ID:        id.Ascending(id.Part),
+		MessageID: msgID,
+		SessionID: a.Session.ID,
+		Type:      opencode.TextPartTypeText,
+		Text:      content,
+		Synthetic: false,
+		Time: opencode.TextPartTime{
+			Start: timestamp,
+			End:   timestamp,
+		},
+	}
+}
+
+func (a *App) createSystemMessage(msgID string, timestamp float64, part opencode.TextPart) Message {
+	return Message{
+		Info: opencode.AssistantMessage{
+			ID:         msgID,
+			SessionID:  a.Session.ID,
+			Role:       opencode.AssistantMessageRoleAssistant,
+			Mode:       "",
+			ModelID:    "",
+			ProviderID: "",
+			Cost:       0,
+			Time: opencode.AssistantMessageTime{
+				Created:   timestamp,
+				Completed: timestamp,
+			},
+			Path:   opencode.AssistantMessagePath{},
+			Tokens: opencode.AssistantMessageTokens{},
+			System: []string{},
+		},
+		Parts: []opencode.PartUnion{part},
+	}
+}
+
+func (a *App) AddSystemMessage(content string, command string) tea.Cmd {
+	msgID := id.Ascending(id.Message)
+	timestamp := float64(time.Now().UnixMilli())
+
+	part := a.createTextPart(msgID, content, timestamp)
+	msg := a.createSystemMessage(msgID, timestamp, part)
+
+	a.Messages = append(a.Messages, msg)
+
+	return func() tea.Msg {
+		return SystemMessageAddedMsg{
+			MessageID:   msgID,
+			CommandName: command,
+		}
+	}
 }
 
 // func (a *App) loadCustomKeybinds() {

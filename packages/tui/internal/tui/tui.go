@@ -27,6 +27,7 @@ import (
 	"github.com/sst/opencode/internal/components/modal"
 	"github.com/sst/opencode/internal/components/status"
 	"github.com/sst/opencode/internal/components/toast"
+	"github.com/sst/opencode/internal/customcommands"
 	"github.com/sst/opencode/internal/layout"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
@@ -365,6 +366,8 @@ func (a Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commands.ExecuteCommandMsg:
 		updated, cmd := a.executeCommand(commands.Command(msg))
 		return updated, cmd
+	case chat.ExecuteCustomCommandMsg:
+		return a.executeCustomCommand(msg.Trigger, msg.Args)
 	case commands.ExecuteCommandsMsg:
 		for _, command := range msg {
 			updated, cmd := a.executeCommand(command)
@@ -607,6 +610,8 @@ func (a Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		updated, cmd := a.app.SwitchToAgent(msg.AgentName)
 		a.app = updated
 		cmds = append(cmds, cmd)
+	case app.SystemMessageAddedMsg:
+		return a, util.CmdHandler(app.SessionLoadedMsg{})
 	case dialog.ThemeSelectedMsg:
 		a.app.State.Theme = msg.ThemeName
 		cmds = append(cmds, a.app.SaveState())
@@ -1265,6 +1270,80 @@ func (a Model) executeCommand(command commands.Command) (tea.Model, tea.Cmd) {
 	case commands.AppExitCommand:
 		return a, tea.Quit
 	}
+	return a, tea.Batch(cmds...)
+}
+
+func (a Model) ensureSession() (Model, tea.Cmd, error) {
+	if a.app.Session.ID != "" {
+		return a, nil, nil
+	}
+
+	session, err := a.app.CreateSession(context.Background())
+	if err != nil {
+		return a, nil, err
+	}
+
+	a.app.Session = session
+	return a, util.CmdHandler(app.SessionCreatedMsg{Session: session}), nil
+}
+
+func formatCommandOutput(result *customcommands.CustomCommandResult, args string) string {
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("**Command:** %s", result.CommandName))
+	if args != "" {
+		content.WriteString(fmt.Sprintf(" %s", args))
+	}
+	content.WriteString("\n\n")
+
+	if result.Output != "" {
+		content.WriteString("```\n")
+		content.WriteString(result.Output)
+		if !strings.HasSuffix(result.Output, "\n") {
+			content.WriteString("\n")
+		}
+		content.WriteString("```")
+	} else {
+		content.WriteString("*Command completed with no output*")
+	}
+
+	return content.String()
+}
+
+func (a Model) executeCustomCommand(trigger, args string) (tea.Model, tea.Cmd) {
+	if a.app.CustomCommandRegistry == nil {
+		return a, toast.NewErrorToast("Custom commands not available")
+	}
+
+	result, err := a.app.CustomCommandRegistry.ExecuteCustomCommandWithContext(trigger, args)
+	if err != nil {
+		slog.Error("Failed to execute custom command", "trigger", trigger, "error", err)
+		return a, toast.NewErrorToast(fmt.Sprintf("Failed to execute custom command: %v", err))
+	}
+
+	if result == nil {
+		return a, toast.NewErrorToast("Custom command not found")
+	}
+
+	if result.Output == "" {
+		return a, toast.NewInfoToast("Custom command executed (no output)")
+	}
+
+	var cmds []tea.Cmd
+
+	updated, sessionCmd, err := a.ensureSession()
+	if err != nil {
+		return a, toast.NewErrorToast(err.Error())
+	}
+	a = updated
+	if sessionCmd != nil {
+		cmds = append(cmds, sessionCmd)
+	}
+
+	content := formatCommandOutput(result, args)
+	cmd := a.app.AddSystemMessage(content, result.CommandName)
+	cmds = append(cmds, cmd)
+	cmds = append(cmds, toast.NewInfoToast(fmt.Sprintf("Command '%s' executed successfully", result.CommandName)))
+
 	return a, tea.Batch(cmds...)
 }
 

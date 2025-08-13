@@ -52,6 +52,12 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 
 For more info on how to configure opencode [**head over to our docs**](https://opencode.ai/docs).
 
+#### Custom Commands
+
+Create your own slash commands using simple markdown files. Perfect for automating workflows and sharing team processes.
+
+📖 **[Custom Commands Guide](CUSTOM_COMMANDS.md)** - Learn how to create and use custom commands
+
 ### Contributing
 
 opencode is an opinionated tool so any fundamental feature needs to go through a

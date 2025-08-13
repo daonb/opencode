@@ -27,6 +27,55 @@ import (
 	"github.com/sst/opencode/internal/util"
 )
 
+type AttachmentInsertedMsg struct{}
+
+type ExecuteCustomCommandMsg struct {
+	Trigger string
+	Args    string
+}
+
+// unescapeClipboardText trims surrounding quotes from clipboard text and returns the inner content.
+// It avoids interpreting backslash escape sequences unless the text is explicitly quoted.
+func (m *editorComponent) unescapeClipboardText(s string) string {
+	t := strings.TrimSpace(s)
+	if len(t) >= 2 {
+		first := t[0]
+		last := t[len(t)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			if u, err := strconv.Unquote(t); err == nil {
+				return u
+			}
+			return t[1 : len(t)-1]
+		}
+	}
+	return t
+}
+
+// pathExists checks if the given path exists. Relative paths are resolved against the app CWD.
+// Supports expanding '~' to the user's home directory.
+func (m *editorComponent) pathExists(p string) bool {
+	if p == "" {
+		return false
+	}
+	if strings.HasPrefix(p, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if p == "~" {
+				p = home
+			} else if strings.HasPrefix(p, "~/") {
+				p = filepath.Join(home, p[2:])
+			}
+		}
+	}
+	check := p
+	if !filepath.IsAbs(check) {
+		check = filepath.Join(m.app.Info.Path.Cwd, check)
+	}
+	if _, err := os.Stat(check); err == nil {
+		return true
+	}
+	return false
+}
+
 type EditorComponent interface {
 	tea.Model
 	tea.ViewModel
@@ -227,7 +276,17 @@ func (m *editorComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updated, cmd := m.Clear()
 			m = updated.(*editorComponent)
 			cmds = append(cmds, cmd)
-			cmds = append(cmds, util.CmdHandler(commands.ExecuteCommandMsg(m.app.Commands[commands.CommandName(commandName)])))
+
+			// First try to find built-in command
+			if builtinCmd, exists := m.app.Commands[commands.CommandName(commandName)]; exists {
+				cmds = append(cmds, util.CmdHandler(commands.ExecuteCommandMsg(builtinCmd)))
+			} else if m.app.CustomCommandRegistry != nil && m.app.CustomCommandRegistry.IsCustomCommand(commandName) {
+				// If not found in built-in commands, check custom commands
+				cmds = append(cmds, util.CmdHandler(ExecuteCustomCommandMsg{
+					Trigger: commandName,
+					Args:    "",
+				}))
+			}
 			return m, tea.Batch(cmds...)
 		case "files":
 			atIndex := m.textarea.LastRuneIndex('@')
